@@ -1,6 +1,9 @@
-package store
-
-const migration001 = `PRAGMA foreign_keys = ON;
+-- Full schema snapshot at migration 012, for black-box upgrade tests.
+-- Mirrors internal/store/schema.go migrations 001-011 plus the migration 012
+-- marker (012 is a data backfill with no schema change). The database runner
+-- applies 013 on top of this fixture. Foreign keys are left at the sqlite
+-- default (off) so the migration-008/009 table rebuilds behave as they do
+-- under the runner's foreign_keys=OFF transaction.
 
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
@@ -62,7 +65,6 @@ CREATE TABLE IF NOT EXISTS inboxes (
   UNIQUE(domain_id, local_part)
 );
 CREATE INDEX IF NOT EXISTS idx_inboxes_account ON inboxes(account_id);
-
 
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
@@ -222,11 +224,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at TEXT NOT NULL
 );
-`
 
-const migration002 = `ALTER TABLE accounts ADD COLUMN active_outbound_credential_id TEXT REFERENCES outbound_credentials(id) ON DELETE SET NULL;`
+ALTER TABLE accounts ADD COLUMN active_outbound_credential_id TEXT REFERENCES outbound_credentials(id) ON DELETE SET NULL;
 
-const migration003 = `ALTER TABLE inboxes ADD COLUMN allowed_senders_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE inboxes ADD COLUMN allowed_senders_json TEXT NOT NULL DEFAULT '[]';
 
 CREATE TABLE IF NOT EXISTS blocked_messages (
   id TEXT PRIMARY KEY,
@@ -246,20 +247,11 @@ CREATE TABLE IF NOT EXISTS blocked_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_blocked_messages_inbox_created ON blocked_messages(inbox_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_blocked_messages_account_created ON blocked_messages(account_id, created_at DESC);
-`
 
-// migration004 adds a status column to outbound_idempotency so a reservation
-// can be claimed atomically before the provider send, closing the race where
-// two concurrent requests with the same key both send.
-const migration004 = `ALTER TABLE outbound_idempotency ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
+ALTER TABLE outbound_idempotency ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
 CREATE INDEX IF NOT EXISTS idx_outbound_idem_status ON outbound_idempotency(account_id, idem_key, status);
-`
 
-// migration005 adds an outbox to messages: a status column (pending/sent/failed)
-// plus retry bookkeeping, and a draft_attachments table so drafts can hold
-// attachments that carry over to the sent message. Existing messages are
-// backfilled to 'sent' (they were delivered synchronously before the outbox).
-const migration005 = `ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'sent';
+ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'sent';
 ALTER TABLE messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE messages ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT '';
@@ -277,13 +269,8 @@ CREATE TABLE IF NOT EXISTS draft_attachments (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_draft_attachments_draft ON draft_attachments(draft_id);
-`
 
-// migration006 adds a per-attempt outbound delivery log. Each provider send
-// (success or failure) appends an immutable row linked to the message, so an
-// operator can see the full retry history for a provider. Rows are pruned to
-// the newest 5000 per account or 30 days, whichever is more recent.
-const migration006 = `CREATE TABLE IF NOT EXISTS outbound_delivery_log (
+CREATE TABLE IF NOT EXISTS outbound_delivery_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   credential_id TEXT REFERENCES outbound_credentials(id) ON DELETE SET NULL,
@@ -297,23 +284,10 @@ const migration006 = `CREATE TABLE IF NOT EXISTS outbound_delivery_log (
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_log_cred ON outbound_delivery_log(account_id, credential_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_outbound_log_msg ON outbound_delivery_log(message_id);
-`
 
-// migration007 lets a domain designate its own outbound credential. It
-// originally resolved the domain credential first and fell back to the
-// account's active credential; migration008 removes that fallback. A domain
-// with no credential queues mail until a provider is assigned.
-const migration007 = `ALTER TABLE domains ADD COLUMN outbound_credential_id TEXT REFERENCES outbound_credentials(id) ON DELETE SET NULL;
-`
+ALTER TABLE domains ADD COLUMN outbound_credential_id TEXT REFERENCES outbound_credentials(id) ON DELETE SET NULL;
 
-// migration008 removes the account-level default provider. A domain may only
-// send through its own outbound credential; a domain with none queues mail.
-// SQLite cannot DROP a column that carries a foreign key, so the accounts table
-// is rebuilt. No data is backfilled: existing domains start with no provider
-// and pause sending until one is assigned.
-// The transaction and foreign_keys pragma are owned by the migration runner
-// (internal/store/migrate.go); this constant contains only the schema work.
-const migration008 = `CREATE TABLE accounts_new (
+CREATE TABLE accounts_new (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   storage_quota_bytes INTEGER NOT NULL,
@@ -324,21 +298,8 @@ INSERT INTO accounts_new(id,name,storage_quota_bytes,storage_used_bytes,created_
   SELECT id,name,storage_quota_bytes,storage_used_bytes,created_at FROM accounts;
 DROP TABLE accounts;
 ALTER TABLE accounts_new RENAME TO accounts;
-`
 
-// migration009 moves inbound credentials from process environment into
-// account-owned encrypted rows and scopes inbound delivery identity. It:
-//   - adds inbound_credentials (multiple per account, one assigned per domain
-//     via domains.inbound_credential_id);
-//   - rebuilds messages and blocked_messages to store the canonical original
-//     envelope recipient and to key deduplication on
-//     (account_id, provider, envelope_recipient, provider_delivery_id).
-//
-// SQLite cannot ALTER a UNIQUE constraint, so both tables are rebuilt. The
-// original recipient is backfilled from messages.envelope_to_json where it was
-// recorded; legacy blocked rows never stored it and are left empty rather than
-// guessing a catch-all address.
-const migration009 = `CREATE TABLE IF NOT EXISTS inbound_credentials (
+CREATE TABLE IF NOT EXISTS inbound_credentials (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   provider TEXT NOT NULL,
@@ -418,133 +379,23 @@ DROP TABLE blocked_messages;
 ALTER TABLE blocked_messages_new RENAME TO blocked_messages;
 CREATE INDEX IF NOT EXISTS idx_blocked_messages_inbox_created ON blocked_messages(inbox_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_blocked_messages_account_created ON blocked_messages(account_id, created_at DESC);
-`
 
-// migration010 scopes outbound idempotency keys to the mailbox they were used
-// for, so a key replayed against a different mailbox in the same account is
-// rejected. Existing rows are reconciled by reconcileIdempotency.
-const migration010 = `ALTER TABLE outbound_idempotency ADD COLUMN inbox_id TEXT NOT NULL DEFAULT '';`
+ALTER TABLE outbound_idempotency ADD COLUMN inbox_id TEXT NOT NULL DEFAULT '';
 
-// migration011 separates an outbound claim (a worker's temporary ownership of
-// a pending message) from retry scheduling, so a crash no longer parks a
-// message for 24 hours. Claims carry an explicit owner and lease expiry.
-const migration011 = `ALTER TABLE messages ADD COLUMN claim_owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE messages ADD COLUMN claim_owner TEXT NOT NULL DEFAULT '';
 ALTER TABLE messages ADD COLUMN claim_expires_at TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_messages_claim ON messages(status, claim_expires_at);
-`
 
-// migration013 replaces the shared credential pools with one optional sending
-// and one optional receiving configuration per domain. It runs inside the
-// runner's foreign_keys=OFF transaction because it rebuilds domains, inboxes
-// and the delivery log.
-//
-//   - domain_sending_configs / domain_receiving_configs each hold one row per
-//     domain, keyed by a composite (domain_id, account_id) foreign key that
-//     cascades with the domain. The old assigned credential rows are copied
-//     per domain so a credential shared by several domains becomes independent
-//     copies; unused credentials are dropped with their tables.
-//   - domains drops the outbound_credential_id/inbound_credential_id
-//     assignment columns; a unique (id, account_id) index backs the composite
-//     config foreign keys.
-//   - inboxes drops the retired outbound_credential_id foreign key while
-//     preserving every other column, including allowed_senders_json.
-//   - outbound_delivery_log replaces credential_id with a nullable domain_id
-//     (SET NULL, no config foreign key) backfilled from the attempt's
-//     message+inbox; attempts with no surviving message keep a NULL domain and
-//     every attempt is retained.
-//
-// The baseline is gated so it cannot recreate the dropped credential tables;
-// see bootstrapBaseline in store.go.
-const migration013 = `
-CREATE TABLE domain_sending_configs (
-  id TEXT PRIMARY KEY,
-  domain_id TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  encrypted_config TEXT NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(domain_id),
-  FOREIGN KEY(domain_id,account_id) REFERENCES domains(id,account_id) ON DELETE CASCADE
-);
-CREATE TABLE domain_receiving_configs (
-  id TEXT PRIMARY KEY,
-  domain_id TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  encrypted_config TEXT NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(domain_id),
-  FOREIGN KEY(domain_id,account_id) REFERENCES domains(id,account_id) ON DELETE CASCADE
-);
-
-INSERT INTO domain_sending_configs(id,domain_id,account_id,provider,encrypted_config,revision,created_at,updated_at)
-  SELECT 'dsc_'||lower(hex(randomblob(16))), d.id, d.account_id, c.provider, c.encrypted_config, 1, c.created_at, c.updated_at
-  FROM domains d JOIN outbound_credentials c ON c.id=d.outbound_credential_id
-  WHERE d.outbound_credential_id IS NOT NULL;
-INSERT INTO domain_receiving_configs(id,domain_id,account_id,provider,encrypted_config,revision,created_at,updated_at)
-  SELECT 'drc_'||lower(hex(randomblob(16))), d.id, d.account_id, c.provider, c.encrypted_config, 1, c.created_at, c.updated_at
-  FROM domains d JOIN inbound_credentials c ON c.id=d.inbound_credential_id
-  WHERE d.inbound_credential_id IS NOT NULL;
-
-CREATE TABLE outbound_delivery_log_new (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  domain_id TEXT REFERENCES domains(id) ON DELETE SET NULL,
-  provider TEXT NOT NULL DEFAULT '',
-  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
-  attempt INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL CHECK(status IN ('sent','failed')),
-  provider_message_id TEXT NOT NULL DEFAULT '',
-  error_text TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-INSERT INTO outbound_delivery_log_new(id,account_id,domain_id,provider,message_id,attempt,status,provider_message_id,error_text,created_at)
-  SELECT l.id, l.account_id,
-    (SELECT i.domain_id FROM messages m JOIN inboxes i ON i.id=m.inbox_id WHERE m.id=l.message_id AND m.account_id=l.account_id),
-    l.provider, l.message_id, l.attempt, l.status, l.provider_message_id, l.error_text, l.created_at
-  FROM outbound_delivery_log l;
-DROP TABLE outbound_delivery_log;
-ALTER TABLE outbound_delivery_log_new RENAME TO outbound_delivery_log;
-
-CREATE TABLE inboxes_new (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  domain_id TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
-  local_part TEXT NOT NULL COLLATE NOCASE,
-  display_name TEXT NOT NULL DEFAULT '',
-  enabled INTEGER NOT NULL DEFAULT 1,
-  allowed_senders_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL,
-  UNIQUE(domain_id, local_part)
-);
-INSERT INTO inboxes_new(id,account_id,domain_id,local_part,display_name,enabled,allowed_senders_json,created_at)
-  SELECT id,account_id,domain_id,local_part,display_name,enabled,allowed_senders_json,created_at FROM inboxes;
-DROP TABLE inboxes;
-ALTER TABLE inboxes_new RENAME TO inboxes;
-
-CREATE TABLE domains_new (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  name TEXT NOT NULL COLLATE NOCASE,
-  catch_all_inbox_id TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE(account_id, name),
-  UNIQUE(name)
-);
-INSERT INTO domains_new(id,account_id,name,catch_all_inbox_id,created_at)
-  SELECT id,account_id,name,catch_all_inbox_id,created_at FROM domains;
-DROP TABLE domains;
-ALTER TABLE domains_new RENAME TO domains;
-CREATE UNIQUE INDEX idx_domains_id_account ON domains(id,account_id);
-
-DROP TABLE outbound_credentials;
-DROP TABLE inbound_credentials;
-
-CREATE INDEX idx_inboxes_account ON inboxes(account_id);
-CREATE INDEX idx_outbound_log_domain ON outbound_delivery_log(account_id, domain_id, id DESC);
-CREATE INDEX idx_outbound_log_msg ON outbound_delivery_log(message_id);
-`
+INSERT INTO schema_migrations(version,applied_at) VALUES
+  ('001','2026-01-01T00:00:00Z'),
+  ('002','2026-01-01T00:00:00Z'),
+  ('003','2026-01-01T00:00:00Z'),
+  ('004','2026-01-01T00:00:00Z'),
+  ('005','2026-01-01T00:00:00Z'),
+  ('006','2026-01-01T00:00:00Z'),
+  ('007','2026-01-01T00:00:00Z'),
+  ('008','2026-01-01T00:00:00Z'),
+  ('009','2026-01-01T00:00:00Z'),
+  ('010','2026-01-01T00:00:00Z'),
+  ('011','2026-01-01T00:00:00Z'),
+  ('012','2026-01-01T00:00:00Z');
